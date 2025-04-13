@@ -4,78 +4,99 @@ import logging
 import time
 import schedule
 import random
-from anticaptchaofficial.turnstileproxyon import *
 from fake_useragent import UserAgent
 
-# Konfigurasi logging
+# 配置日志
 logging.basicConfig(
     filename='bot.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Inisialisasi User-Agent acak
+# 初始化 User-Agent
 ua = UserAgent()
 
-# Fungsi untuk memuat konfigurasi dari config.json
+# 加载配置文件
 def load_config():
     try:
         with open("config.json", "r") as f:
             config = json.load(f)
-        logging.info("Berhasil memuat config.json")
+        logging.info("成功加载 config.json")
         return config
     except Exception as e:
-        logging.error(f"Error membaca config.json: {e}")
-        print(f"Error membaca config.json: {e}")
+        logging.error(f"读取 config.json 出错: {e}")
+        print(f"读取 config.json 出错: {e}")
         return None
 
-# Fungsi untuk menyelesaikan Turnstile CAPTCHA dengan retry
-def solve_turnstile_captcha(api_key, website_url, site_key, proxy, wallet_address, max_retries=3):
+# 使用 2Captcha 解决 Turnstile 验证码
+def solve_turnstile_2captcha(api_key, site_key, page_url, proxy, wallet_address, max_retries=3):
     retry_count = 0
     proxy_errors = ["ERROR_PROXY_TOO_SLOW", "ERROR_PROXY_CONNECTION_FAILED", "ERROR_PROXY_TIMEOUT"]
 
     while retry_count < max_retries:
         try:
-            solver = turnstileProxyon()
-            solver.set_verbose(1)
-            solver.set_key(api_key)
-            solver.set_website_url(website_url)
-            solver.set_website_key(site_key)
-            solver.set_proxy_address(proxy["address"])
-            solver.set_proxy_port(proxy["port"])
-            solver.set_proxy_login(proxy["login"])
-            solver.set_proxy_password(proxy["password"])
-            solver.set_action("faucet")
-            solver.set_soft_id(0)
+            url = 'http://2captcha.com/in.php'
+            data = {
+                'key': api_key,
+                'method': 'turnstile',
+                'sitekey': site_key,
+                'pageurl': page_url,
+                'json': 1
+            }
+            
+            if proxy:
+                proxy_str = f"{proxy['login']}:{proxy['password']}@{proxy['address']}:{proxy['port']}"
+                data['proxy'] = proxy_str
+                data['proxytype'] = 'HTTP'
 
-            token = solver.solve_and_return_solution()
-            if token:
-                logging.info(f"CAPTCHA Token untuk {wallet_address} (proxy: {proxy['address']}): {token}")
-                print(f"CAPTCHA Token untuk {wallet_address}: {token}")
-                return token
-            else:
-                error_code = solver.error_code
-                logging.error(f"Gagal menyelesaikan CAPTCHA untuk {wallet_address}: {error_code}")
-                print(f"Gagal menyelesaikan CAPTCHA untuk {wallet_address}: {error_code}")
-                if error_code in proxy_errors:
-                    retry_count += 1
-                    logging.warning(f"Proxy error ({error_code}) untuk {wallet_address}. Retry {retry_count}/{max_retries}...")
-                    print(f"Proxy error ({error_code}). Retry {retry_count}/{max_retries}...")
-                    time.sleep(5)
-                    continue
+            # 提交验证码任务
+            response = requests.post(url, data=data)
+            result = response.json()
+            
+            if result['status'] != 1:
+                logging.error(f"提交验证码失败: {result}")
+                print(f"提交验证码失败: {result}")
                 return None
+
+            request_id = result['request']
+            logging.info(f"验证码任务提交成功，ID: {request_id}")
+            print(f"验证码任务提交成功，ID: {request_id}")
+
+            # 查询验证码结果
+            for i in range(max_retries):
+                time.sleep(5)
+                res = requests.get('http://2captcha.com/res.php', params={
+                    'key': api_key,
+                    'action': 'get',
+                    'id': request_id,
+                    'json': 1
+                })
+                res_json = res.json()
+                if res_json['status'] == 1:
+                    logging.info(f"验证码解决成功: {res_json['request']}")
+                    print(f"验证码解决成功: {res_json['request']}")
+                    return res_json['request']
+                elif res_json['request'] == 'CAPCHA_NOT_READY':
+                    logging.info(f"验证码仍在处理中... 尝试 {i+1}/{max_retries}")
+                    print(f"验证码仍在处理中... 尝试 {i+1}/{max_retries}")
+                    continue
+                else:
+                    logging.error(f"验证码处理失败: {res_json}")
+                    print(f"验证码处理失败: {res_json}")
+                    break
         except Exception as e:
-            logging.error(f"Error saat menyelesaikan CAPTCHA untuk {wallet_address}: {e}")
-            print(f"Error saat menyelesaikan CAPTCHA untuk {wallet_address}: {e}")
+            logging.error(f"验证码处理出错: {e}")
+            print(f"验证码处理出错: {e}")
             retry_count += 1
-            logging.warning(f"Exception selama CAPTCHA untuk {wallet_address}. Retry {retry_count}/{max_retries}...")
-            print(f"Exception selama CAPTCHA. Retry {retry_count}/{max_retries}...")
+            logging.warning(f"验证码处理失败，重试 {retry_count}/{max_retries}")
+            print(f"验证码处理失败，重试 {retry_count}/{max_retries}")
             time.sleep(5)
-    logging.error(f"Gagal menyelesaikan CAPTCHA untuk {wallet_address} setelah {max_retries} percobaan.")
-    print(f"Gagal menyelesaikan CAPTCHA untuk {wallet_address} setelah {max_retries} percobaan.")
+
+    logging.error(f"尝试 {max_retries} 次后验证码处理失败")
+    print(f"尝试 {max_retries} 次后验证码处理失败")
     return None
 
-# Fungsi untuk mengirim permintaan ke faucet
+# 发送请求到 faucet
 def request_faucet(captcha_token, wallet_address, proxy):
     url = "https://irys.xyz/api/faucet"
     headers = {
@@ -91,7 +112,7 @@ def request_faucet(captcha_token, wallet_address, proxy):
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
-        "user-agent": ua.random  # User-Agent acak
+        "user-agent": ua.random
     }
     payload = {
         "captchaToken": captcha_token,
@@ -104,34 +125,34 @@ def request_faucet(captcha_token, wallet_address, proxy):
 
     try:
         response = requests.post(url, headers=headers, json=payload, proxies=proxies)
-        logging.info(f"Status Code untuk {wallet_address}: {response.status_code}")
-        logging.info(f"Response untuk {wallet_address}: {response.text}")
-        print(f"Status Code untuk {wallet_address}: {response.status_code}")
-        print(f"Response: {response.text}")
+        logging.info(f"状态码：{response.status_code}")
+        logging.info(f"响应：{response.text}")
+        print(f"状态码：{response.status_code}")
+        print(f"响应：{response.text}")
         return response.json()
     except Exception as e:
-        logging.error(f"Error saat mengirim permintaan untuk {wallet_address}: {e}")
-        print(f"Error saat mengirim permintaan untuk {wallet_address}: {e}")
+        logging.error(f"请求失败：{e}")
+        print(f"请求失败：{e}")
         return None
 
-# Fungsi utama untuk memproses semua wallet
+# 处理所有钱包
 def process_wallets():
-    print("Memulai proses faucet Irys...")
-    logging.info("Memulai proses faucet Irys...")
+    print("开始处理 Irys faucet...")
+    logging.info("开始处理 Irys faucet...")
     config = load_config()
     if not config:
-        logging.error("Gagal memuat konfigurasi. Bot dihentikan.")
-        print("Bot dihentikan karena gagal memuat konfigurasi.")
+        logging.error("无法加载配置，Bot 停止。")
+        print("无法加载配置，Bot 停止。")
         return
 
-    api_key = config.get("anti_captcha_api_key")
+    api_key = config.get("2captcha_api_key")
     website_url = config.get("website_url")
     site_key = config.get("site_key")
     wallets = config.get("wallets", [])
 
     if not wallets:
-        logging.error("Tidak ada wallet ditemukan di config.json.")
-        print("Tidak ada wallet ditemukan di config.json.")
+        logging.error("config.json 中没有钱包。")
+        print("config.json 中没有钱包。")
         return
 
     for wallet in wallets:
@@ -139,35 +160,35 @@ def process_wallets():
         proxy = wallet.get("proxy")
 
         if not wallet_address or not proxy:
-            logging.error(f"Konfigurasi tidak lengkap untuk wallet: {wallet_address}")
-            print(f"Konfigurasi tidak lengkap untuk wallet: {wallet_address}")
+            logging.error(f"钱包配置不完整: {wallet_address}")
+            print(f"钱包配置不完整: {wallet_address}")
             continue
 
-        logging.info(f"Memproses wallet: {wallet_address} dengan proxy: {proxy['address']}")
-        print(f"Memproses wallet: {wallet_address} dengan proxy: {proxy['address']}")
-        captcha_token = solve_turnstile_captcha(api_key, website_url, site_key, proxy, wallet_address)
+        logging.info(f"处理钱包: {wallet_address}，代理: {proxy['address']}")
+        print(f"处理钱包: {wallet_address}，代理: {proxy['address']}")
+        captcha_token = solve_turnstile_2captcha(api_key, site_key, website_url, proxy, wallet_address)
         if captcha_token:
-            logging.info(f"Mengirim permintaan faucet untuk {wallet_address}...")
-            print(f"Mengirim permintaan faucet untuk {wallet_address}...")
+            logging.info(f"请求 faucet: {wallet_address}...")
+            print(f"请求 faucet: {wallet_address}...")
             result = request_faucet(captcha_token, wallet_address, proxy)
             if result:
-                logging.info(f"Permintaan berhasil untuk {wallet_address}: {result}")
-                print(f"Permintaan berhasil untuk {wallet_address}: {result}")
+                logging.info(f"请求成功: {wallet_address}，结果: {result}")
+                print(f"请求成功: {wallet_address}，结果: {result}")
             else:
-                logging.error(f"Permintaan gagal untuk {wallet_address}.")
-                print(f"Permintaan gagal untuk {wallet_address}.")
+                logging.error(f"请求失败: {wallet_address}")
+                print(f"请求失败: {wallet_address}")
         else:
-            logging.error(f"CAPTCHA gagal untuk {wallet_address}. Melanjutkan ke wallet berikutnya.")
-            print(f"CAPTCHA gagal untuk {wallet_address}. Melanjutkan ke wallet berikutnya.")
+            logging.error(f"验证码失败: {wallet_address}，继续下一个钱包。")
+            print(f"验证码失败: {wallet_address}，继续下一个钱包。")
         time.sleep(5)
 
-# Fungsi utama
+# 主函数
 def main():
     schedule.every(24).hours.do(process_wallets)
     process_wallets()
 
-    print("Scheduler berjalan. Menunggu jadwal berikutnya (setiap 24 jam)...")
-    logging.info("Scheduler dimulai.")
+    print("调度程序启动，等待下次任务（每24小时）...")
+    logging.info("调度程序启动。")
     while True:
         schedule.run_pending()
         time.sleep(60)

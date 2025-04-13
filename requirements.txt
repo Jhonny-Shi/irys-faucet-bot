@@ -1,4 +1,4 @@
-requests
-anticaptchaofficial
-schedule
-fake-useragent
+requests==2.28.1
+schedule==1.1.0
+fake_useragent==1.1.1
+python-2captcha==1.0.2
